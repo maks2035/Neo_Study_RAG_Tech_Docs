@@ -1,13 +1,19 @@
-
 import json
 import time
 from openai import OpenAI
+from pathlib import Path
+from langchain_core.documents import Document
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_classic.retrievers import EnsembleRetriever
+from langchain_community.retrievers import BM25Retriever
+from langchain_community.vectorstores import FAISS
 
 
 #MODEL_LLAMA="meta-llama/llama-3.3-70b-instruct:free"
 #MODEL_QWEN="qwen/qwen3-next-80b-a3b-instruct:free"
 #MODEL_GEMMA="google/gemma-3-27b-it:free"
 MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
+FILE_WITH_CHUNKS = "chunks_data.json"
 
 SCHEMA = {
     "type": "object",
@@ -18,32 +24,22 @@ SCHEMA = {
         },
         "sources": {
             "type": "array",
-            "items": {"type": "string"},
-            "page": {"type": "int"},
-            "description": "List of sources"
+            "items": {
+                "type": "object",
+                "properties": {
+                    "page": {"type": "integer"},
+                    "source": {"type": "string"},
+                    "text": {"type": "string"}
+                },
+                "required": ["page", "source", "text"]
+            }
         }
     },
     "required": ["answer", "sources"],
     "additionalProperties": False
 }
 
-CONTEXT = [
-    {"text": "шарик синий", "metadata": {"source": "текст1.md", "page": 12}},
-    {"text": "шарик не черный", "metadata": {"source": "текст42.md", "page": 132}},
-    {"text": "куб в в красную крапинку", "metadata": {"source": "текст42.md", "page": 32}},
-]
-
-question = "какого цвета пирамида?"
-
-user_prompt = f"""
-CONTEXT:
-{json.dumps(CONTEXT, ensure_ascii=False)}
-
-QUESTION:
-{question}
-"""
-
-system_prompt = f"""
+SYSTEM_PROMPT = f"""
         You are a documentation assistant.
         Answer only using the provided context.
         Give the answer in the same language in which the question was asked.
@@ -52,21 +48,83 @@ system_prompt = f"""
     """
 
 
-OPENROUTER_KEY = ''
+def build_user_prompt(context, question) :
+    #Создаёт user prompt с контекстом и вопросом
+    return f"""
+CONTEXT:
+{context}
 
-from pathlib import Path
+QUESTION:
+{question}
+""".strip()
 
-key_path = Path(__file__).resolve().parent.parent.parent / "OPENROUTER_KEY.txt"
 
-with open(key_path, "r") as f:
-    OPENROUTER_KEY = f.read().strip()
+def format_context_for_prompt(retriever_results):
+    """Форматирует найденные чанки в читаемый контекст для промпта"""
+    formatted = []
+    for i, doc in enumerate(retriever_results, 1):
+        source = doc.metadata.get("source", "unknown")
+        page = doc.metadata.get("page", "?")
+        text = doc.page_content.strip()
+        formatted.append(f"[{i}] {source}, стр. {page}:\n{text}")
+    return "\n\n".join(formatted)
 
-client = OpenAI(
-    api_key=OPENROUTER_KEY,
-    base_url="https://openrouter.ai/api/v1"
-)
+def create_ensemble_retriever(docs, k = 3):
+    #Создаёт комбинированный ретривер (векторный + BM25)
+    
+    # Векторный поиск
+    embeddings = HuggingFaceEmbeddings(
+        model_name="cointegrated/LaBSE-en-ru",
+        model_kwargs={"device": "cpu"}
+    )
+    vectorstore = FAISS.from_documents(docs, embeddings)
+    vector_retriever = vectorstore.as_retriever(
+        search_type="similarity",
+        search_kwargs={"k": k}
+    )
+    
+    # BM25 (ключевые слова)
+    bm25_retriever = BM25Retriever.from_documents(docs)
+    bm25_retriever.k = k
+    
+    # Комбинированный
+    ensemble_retriever = EnsembleRetriever(
+        retrievers=[vector_retriever, bm25_retriever],
+        weights=[0.6, 0.4]
+    )
+    
+    return ensemble_retriever
 
-def ask_llm(user_prompt, system_prompt, MODEL, temperature=0.7, retries=3):
+def chunks_to_documents(chunks):
+    #Конвертирует словари в Document объекты LangChain
+    return [
+        Document(
+            page_content=chunk["text"],
+            metadata=chunk["metadata"]
+        )
+        for chunk in chunks
+    ]
+
+def load_chunks(filepath):
+    #Загружает чанки из JSON файла
+    with open(filepath, 'r', encoding='utf-8') as f:
+        if filepath.endswith('.jsonl'):
+            chunks = []
+            for line in f:
+                if line.strip():
+                    chunks.append(json.loads(line))
+            return chunks
+        else:
+            return json.load(f)
+
+def load_api_key():
+    #Загрузка ключа openroutera
+    key_path = Path(__file__).resolve().parent.parent.parent / "OPENROUTER_KEY.txt"
+    with open(key_path, "r") as f:
+        return f.read().strip()
+
+def ask_llm(user_prompt, system_prompt, client, MODEL, temperature=0.7, retries=3):
+    #Отправка вопроса и получение ответа
     for _ in range(retries):
         try:
             result = client.chat.completions.create(
@@ -86,8 +144,55 @@ def ask_llm(user_prompt, system_prompt, MODEL, temperature=0.7, retries=3):
 
     return "Failed after retries"
 
+def rag_query(question, retriever, client, model, temperature = 0.5):
 
-answer = ask_llm(user_prompt, system_prompt, MODEL, temperature=0.3)
+    #Основной RAG-пайплайн: поиск → контекст → LLM → ответ
+    
+    results = retriever.invoke(question)
+    
+    if not results:
+        return json.dumps({
+            "answer": "The information was not found in the submitted documents",
+            "sources": []
+        }, ensure_ascii=False)
+    
+    
+    context = format_context_for_prompt(results)
+    
+    
+    user_prompt = build_user_prompt(context, question)
+    
+    
+    response = ask_llm(user_prompt, SYSTEM_PROMPT, client, model, temperature=temperature)
+    
+    if response is None:
+        return json.dumps({
+            "answer": "Error generating response",
+            "sources": []
+        }, ensure_ascii=False)
+    
+    return response.choices[0].message.content
 
-print(answer)
-print(answer.choices[0].message.content)
+
+
+
+if __name__ == "__main__":
+
+    OPENROUTER_KEY = load_api_key()
+
+    client = OpenAI(
+        api_key=OPENROUTER_KEY,
+        base_url="https://openrouter.ai/api/v1"
+    )
+
+    chunks = load_chunks(FILE_WITH_CHUNKS)
+
+    docs = chunks_to_documents(chunks)
+
+    retriever = create_ensemble_retriever(docs, k=3)
+
+    test_query = "к чему может привести использование прибора с истекшим сроком службы?"
+
+    result_json = rag_query(test_query, retriever, client, MODEL, 0.3)
+
+    print(result_json)
