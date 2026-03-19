@@ -13,6 +13,13 @@ from langchain_community.vectorstores import FAISS
 #MODEL_QWEN="qwen/qwen3-next-80b-a3b-instruct:free"
 #MODEL_GEMMA="google/gemma-3-27b-it:free"
 MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
+NEO_MODEL_QWEN = "qwen-3-235b-a22b-instruct-2507"
+
+NEO_MODEL_GPT = "gpt-oss-120b"
+
+NEO_URL = "https://litellm.happyhub.ovh/v1"
+OPENROUTER_URL = "https://openrouter.ai/api/v1"
+
 FILE_WITH_CHUNKS = "chunks_data.json"
 
 SCHEMA = {
@@ -117,13 +124,13 @@ def load_chunks(filepath):
         else:
             return json.load(f)
 
-def load_api_key():
+def load_api_key(path_to_key):
     #Загрузка ключа openroutera
-    key_path = Path(__file__).resolve().parent.parent.parent / "OPENROUTER_KEY.txt"
+    key_path = Path(__file__).resolve().parent.parent.parent / path_to_key
     with open(key_path, "r") as f:
         return f.read().strip()
 
-def ask_llm(user_prompt, system_prompt, client, MODEL, temperature=0.7, retries=3):
+def ask_llm(user_prompt, system_prompt, client, MODEL, temperature=0.7, retries=1):
     #Отправка вопроса и получение ответа
     for _ in range(retries):
         try:
@@ -142,7 +149,7 @@ def ask_llm(user_prompt, system_prompt, client, MODEL, temperature=0.7, retries=
             print("Retrying...", e)
             time.sleep(5)
 
-    return "Failed after retries"
+    return None
 
 def rag_query(question, retriever, client, model, temperature = 0.5):
 
@@ -165,7 +172,7 @@ def rag_query(question, retriever, client, model, temperature = 0.5):
     
     response = ask_llm(user_prompt, SYSTEM_PROMPT, client, model, temperature=temperature)
     
-    if response is None:
+    if response is None or isinstance(response, str):
         return json.dumps({
             "answer": "Error generating response",
             "sources": []
@@ -178,11 +185,11 @@ def rag_query(question, retriever, client, model, temperature = 0.5):
 
 if __name__ == "__main__":
 
-    OPENROUTER_KEY = load_api_key()
-
+    KEY = load_api_key("NEO_KEY.txt")
+    
     client = OpenAI(
-        api_key=OPENROUTER_KEY,
-        base_url="https://openrouter.ai/api/v1"
+        api_key=KEY,
+        base_url=NEO_URL
     )
 
     chunks = load_chunks(FILE_WITH_CHUNKS)
@@ -193,6 +200,6 @@ if __name__ == "__main__":
 
     test_query = "к чему может привести использование прибора с истекшим сроком службы?"
 
-    result_json = rag_query(test_query, retriever, client, MODEL, 0.3)
+    result_json = rag_query(test_query, retriever, client, NEO_MODEL_GPT, 0.3)
 
     print(result_json)
