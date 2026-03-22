@@ -61,7 +61,6 @@ def process_pdf_to_chunks(pdf_path, output_path, chunk_size, chunk_overlap):
    try:
       with open(output_path, "w", encoding="utf-8") as f:
          json.dump(processed_chunks, f, ensure_ascii=False, indent=2)
-         print("213123")
          return True
 
    except Exception as e:
