@@ -1,6 +1,5 @@
 import json
 import os
-#import uuid
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -49,7 +48,6 @@ def process_pdf_to_chunks(pdf_path, output_path, chunk_size, chunk_overlap):
       clean_meta = {
          "source": source_name,
          "page": page_label,
-         #"id_chunk": str(uuid.uuid4())
       }
 
       chunk_data = {
