@@ -34,11 +34,12 @@ SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
+                    "chunk_id": {"type": "integer"},
                     "page": {"type": "integer"},
                     "source": {"type": "string"},
                     "text": {"type": "string"}
                 },
-                "required": ["page", "source", "text"]
+                "required": ["chunk_id", "page", "source", "text"]
             }
         }
     },
@@ -48,32 +49,55 @@ SCHEMA = {
 
 SYSTEM_PROMPT = f"""
         You are a documentation assistant.
-        Answer only using the provided context.
-        Give the answer in the same language in which the question was asked.
-        If the answer is not in the context, say "The information was not found in the submitted documents"and nothing more.
-        Return JSON matching this schema: {json.dumps(SCHEMA, ensure_ascii=False)}.
+
+        GOAL:
+        Answer the user's question based only on the provided context.
+
+        TASKS:
+        1. Analyze the context
+        2. Find relevant information
+        3. Generate an answer
+        4. Provide sources
+        5. Return JSON
+
+        RULES:
+        - Use ONLY the provided context
+        - Do NOT use prior knowledge
+        - Do NOT make assumptions
+        - Answer in the same language as the question
+
+        - If the answer is not found, return EXACTLY:
+        "The information was not found in the submitted documents"
+
+        OUTPUT FORMAT:
+            - Return ONLY valid JSON
+            - Do NOT add text outside JSON
+            - The JSON must strictly match this schema:
+        {json.dumps(SCHEMA, ensure_ascii=False)}.
     """
 
 
 def build_user_prompt(context, question) :
     #Создаёт user prompt с контекстом и вопросом
     return f"""
-CONTEXT:
+<CONTEXT>
 {context}
-
-QUESTION:
+</CONTEXT>
+<QUESTION>
 {question}
+</QUESTION>
 """.strip()
 
 
 def format_context_for_prompt(retriever_results):
-    """Форматирует найденные чанки в читаемый контекст для промпта"""
+    #Форматирует найденные чанки в читаемый контекст для промпта
     formatted = []
     for i, doc in enumerate(retriever_results, 1):
         source = doc.metadata.get("source", "unknown")
         page = doc.metadata.get("page", "?")
+        chunk_id = doc.metadata.get("chunk_id", "?")
         text = doc.page_content.strip()
-        formatted.append(f"[{i}] {source}, стр. {page}:\n{text}")
+        formatted.append(f"[{i}],chunk_id {chunk_id}, {source}, стр. {page}:\n{text}")
     return "\n\n".join(formatted)
 
 def create_ensemble_retriever(docs, k = 3):
@@ -107,7 +131,10 @@ def chunks_to_documents(chunks):
     return [
         Document(
             page_content=chunk["text"],
-            metadata=chunk["metadata"]
+            metadata={
+                **chunk["metadata"],
+                "chunk_id": chunk["id"]        
+            }
         )
         for chunk in chunks
     ]
@@ -130,7 +157,7 @@ def load_api_key(path_to_key):
     with open(key_path, "r") as f:
         return f.read().strip()
 
-def ask_llm(user_prompt, system_prompt, client, MODEL, temperature=0.7, retries=1):
+def ask_llm(user_prompt, system_prompt, client, MODEL, temperature=0.7, retries=3):
     #Отправка вопроса и получение ответа
     for _ in range(retries):
         try:
@@ -165,10 +192,8 @@ def rag_query(question, retriever, client, model, temperature = 0.5):
     
     
     context = format_context_for_prompt(results)
-    
-    
+
     user_prompt = build_user_prompt(context, question)
-    
     
     response = ask_llm(user_prompt, SYSTEM_PROMPT, client, model, temperature=temperature)
     
@@ -193,13 +218,13 @@ if __name__ == "__main__":
     )
 
     chunks = load_chunks(FILE_WITH_CHUNKS)
-
+    
     docs = chunks_to_documents(chunks)
-
+    
     retriever = create_ensemble_retriever(docs, k=3)
 
     test_query = "к чему может привести использование прибора с истекшим сроком службы?"
-
-    result_json = rag_query(test_query, retriever, client, NEO_MODEL_GPT, 0.3)
-
+    
+    result_json = rag_query(test_query, retriever, client, NEO_MODEL_GPT, 0.5)
+    
     print(result_json)
