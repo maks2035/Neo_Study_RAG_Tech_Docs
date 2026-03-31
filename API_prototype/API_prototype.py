@@ -2,6 +2,9 @@ import json
 import time
 from openai import OpenAI
 from pathlib import Path
+from typing import List
+from pydantic import BaseModel, Field
+
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_classic.retrievers import EnsembleRetriever
@@ -22,30 +25,16 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1"
 
 FILE_WITH_CHUNKS = "chunks_data.json"
 
-SCHEMA = {
-    "type": "object",
-    "properties": {
-        "answer": {
-            "type": "string",
-            "description": "The answer to the user's question"
-        },
-        "sources": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "chunk_id": {"type": "integer"},
-                    "page": {"type": "integer"},
-                    "source": {"type": "string"},
-                    "text": {"type": "string"}
-                },
-                "required": ["chunk_id", "page", "source", "text"]
-            }
-        }
-    },
-    "required": ["answer", "sources"],
-    "additionalProperties": False
-}
+class Source(BaseModel):
+    chunk_id: int
+    page: int
+    source: str
+    text: str
+
+
+class AnswerSchema(BaseModel):
+    answer: str = Field(description="The answer to the user's question")
+    sources: List[Source]
 
 SYSTEM_PROMPT = f"""
         You are a documentation assistant.
@@ -72,8 +61,7 @@ SYSTEM_PROMPT = f"""
         OUTPUT FORMAT:
             - Return ONLY valid JSON
             - Do NOT add text outside JSON
-            - The JSON must strictly match this schema:
-        {json.dumps(SCHEMA, ensure_ascii=False)}.
+            - The response must strictly follow the provided Pydantic schema
     """
 
 
@@ -161,16 +149,27 @@ def ask_llm(user_prompt, system_prompt, client, MODEL, temperature=0.7, retries=
     #Отправка вопроса и получение ответа
     for _ in range(retries):
         try:
-            result = client.chat.completions.create(
+            response = client.chat.completions.create(
                 model=MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=temperature,
-                response_format={"type": "json_object"}
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "answer_schema",
+                        "schema": AnswerSchema.model_json_schema()
+                    }
+                }
             )
-            return result
+
+            raw_output = response.choices[0].message.content
+
+            parsed = AnswerSchema.model_validate_json(raw_output)
+
+            return parsed.model_dump_json(ensure_ascii=False)
 
         except Exception as e:
             print("Retrying...", e)
@@ -197,13 +196,13 @@ def rag_query(question, retriever, client, model, temperature = 0.5):
     
     response = ask_llm(user_prompt, SYSTEM_PROMPT, client, model, temperature=temperature)
     
-    if response is None or isinstance(response, str):
+    if response is None:
         return json.dumps({
             "answer": "Error generating response",
             "sources": []
         }, ensure_ascii=False)
-    
-    return response.choices[0].message.content
+
+    return response
 
 
 
