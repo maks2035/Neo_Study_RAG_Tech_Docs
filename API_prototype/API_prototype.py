@@ -32,6 +32,15 @@ class Source(BaseModel):
     text: str
 
 
+class TopKRetriever:
+    def __init__(self, retriever, k):
+        self.retriever = retriever
+        self.k = k
+
+    def invoke(self, query):
+        docs = self.retriever.invoke(query)
+        return docs[:self.k]
+
 class AnswerSchema(BaseModel):
     answer: str = Field(description="The answer to the user's question")
     sources: List[Source]
@@ -111,8 +120,9 @@ def create_ensemble_retriever(docs, k = 3):
         retrievers=[vector_retriever, bm25_retriever],
         weights=[0.6, 0.4]
     )
-    
-    return ensemble_retriever
+
+    final_retriever = TopKRetriever(ensemble_retriever, k)
+    return final_retriever
 
 def chunks_to_documents(chunks):
     #Конвертирует словари в Document объекты LangChain
@@ -220,7 +230,7 @@ if __name__ == "__main__":
     
     docs = chunks_to_documents(chunks)
     
-    retriever = create_ensemble_retriever(docs, k=3)
+    retriever = create_ensemble_retriever(docs, k=5)
 
     test_query = "к чему может привести использование прибора с истекшим сроком службы?"
     
